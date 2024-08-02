@@ -4,6 +4,6 @@ services:
     build:
       context: .
       args:
-        BUILD_FROM: ${BUILD_FROM}
+        BUILD_FROM: BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.19
     volumes:
       - ./.env:/usr/src/app/.env:ro
