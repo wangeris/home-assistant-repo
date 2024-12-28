@@ -20,6 +20,7 @@ export class winetHandler {
   private logger: Winston.Logger;
   private properties!: Properties;
   private host: string;
+  private ssl: boolean;
   private lang: string;
   private frequency: number;
   private callbackUpdatedStatus!: (
@@ -58,6 +59,7 @@ export class winetHandler {
   ) {
     this.logger = logger;
     this.host = host;
+    this.ssl = false;
     this.lang = lang;
     this.frequency = frequency;
     if (winetUser) {
@@ -86,7 +88,30 @@ export class winetHandler {
     this.callbackUpdatedStatus = callback;
   }
 
-  public connect(): void {
+  public setWatchdog(): void {
+    this.watchdogInterval = setInterval(() => {
+      if (this.watchdogLastData === undefined) {
+        return;
+      }
+
+      const diff = Date.now() - this.watchdogLastData;
+      if (diff > this.frequency * 1000 * 6) {
+        this.logger.error('Watchdog triggered, reconnecting');
+        this.reconnect();
+      }
+    }, this.frequency * 1000);
+  }
+
+  public clearWatchdog(): void {
+    if (this.watchdogInterval !== undefined) {
+      clearInterval(this.watchdogInterval);
+    }
+  }
+
+  public connect(ssl?: boolean): void {
+    if (ssl !== undefined) {
+      this.ssl = ssl;
+    }
     this.token = '';
     this.currentDevice = undefined;
     this.inFlightDevice = undefined;
@@ -97,12 +122,21 @@ export class winetHandler {
     if (this.scanInterval !== undefined) {
       clearInterval(this.scanInterval);
     }
-    if (this.watchdogInterval !== undefined) {
-      clearInterval(this.watchdogInterval);
-    }
     this.watchdogLastData = Date.now();
+    this.setWatchdog();
 
-    this.ws = new Websocket(`ws://${this.host}:8082/ws/home/overview`);
+    const wsOptions = this.ssl
+      ? {
+          rejectUnauthorized: false, // Ignore self-signed certificate error
+        }
+      : {};
+
+    this.ws = new Websocket(
+      this.ssl
+        ? `wss://${this.host}:443/ws/home/overview`
+        : `ws://${this.host}:8082/ws/home/overview`,
+      wsOptions
+    );
 
     this.ws.on('open', this.onOpen.bind(this));
     this.ws.on('message', this.onMessage.bind(this));
@@ -116,9 +150,7 @@ export class winetHandler {
     if (this.scanInterval !== undefined) {
       clearInterval(this.scanInterval);
     }
-    if (this.watchdogInterval !== undefined) {
-      clearInterval(this.watchdogInterval);
-    }
+    this.clearWatchdog();
 
     setTimeout(
       () => {
@@ -147,22 +179,10 @@ export class winetHandler {
         this.scanDevices();
       }
     }, this.frequency * 1000);
-
-    this.watchdogInterval = setInterval(() => {
-      if (this.watchdogLastData === undefined) {
-        return;
-      }
-
-      const diff = Date.now() - this.watchdogLastData;
-      if (diff > this.frequency * 1000 * 6) {
-        this.logger.error('Watchdog triggered, reconnecting');
-        this.reconnect();
-      }
-    }, this.frequency * 1000);
   }
 
   private onError(error: Websocket.ErrorEvent) {
-    this.logger.error('Websocket error:', error.message);
+    this.logger.error('Websocket error:', error);
     this.analytics.registerError('websocket_onError', error.message);
 
     if (this.watchdogInterval === undefined) {
@@ -374,10 +394,21 @@ export class winetHandler {
 
         let mpptTotalW = 0;
         for (const data of directResult.data.list) {
-          const nameV = data.name + ' Voltage';
-          const nameA = data.name + ' Current';
-          const nameW = data.name + ' Power';
+          const names = data.name.split('%');
+          var name = this.properties[names[0]];
+          if (!name) {
+            name = data.name;
+          }
 
+          var nameV = name + ' Voltage';
+          var nameA = name + ' Current';
+          var nameW = name + ' Power';
+
+          if(names.length > 1) {
+            nameV = nameV.replace('{0}', names[1].replace('@', ''));
+            nameA = nameA.replace('{0}', names[1].replace('@', ''));
+            nameW = nameW.replace('{0}', names[1].replace('@', ''));
+          }
           const dataPointV: DeviceStatus = {
             name: nameV,
             slug: slugify(nameV, {lower: true, strict: true, replacement: '_'}),
@@ -407,7 +438,9 @@ export class winetHandler {
             dirty: true,
           };
 
-          mpptTotalW += dataPointW.value as number;
+          if (dataPointW.value !== undefined && dataPointW.name.toLowerCase().startsWith('mppt')) {
+            mpptTotalW += dataPointW.value as number;
+          }
 
           this.updateDeviceStatus(receivedDevice, dataPointV);
           this.updateDeviceStatus(receivedDevice, dataPointA);
